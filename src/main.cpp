@@ -66,6 +66,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
         CCLabelBMFont* label = nullptr;
         rb::Stats stats;
         bool hold = false;     // estado REAL del boton (lo llevamos nosotros)
+        int deaths = 0, dStep = 0, dObj = -1;   // diagnostico de muertes durante la busqueda
     };
     Fields& fld() { return *m_fields.operator->(); }
 
@@ -145,13 +146,15 @@ class $modify(RoutePlayLayer, PlayLayer) {
         auto& f = fld();
         f.path.clear(); f.route.clear(); f.visited.clear();
         f.lastHold = false; f.died = f.completed = false;
-        f.steps = f.expansions = f.backtracks = 0; f.bestPct = 0;
+        f.steps = f.expansions = f.backtracks = 0; f.bestPct = 0; f.deaths = 0; f.dStep = 0; f.dObj = -1;
         if (fresh) f.replans = 0;
         f.safeA = nullptr; f.safeB = nullptr;
         this->resetLevelFromStart(); releaseAll();
         f.sc = 0; f.t0 = Clock::now();
         f.needInit = true;                       // el nodo inicial se crea en el siguiente frame
         f.mode = rb::Mode::Search;
+        log::info("Route Bot: search started");
+        updateHud();
     }
 
     void runSearchSlice() {
@@ -159,6 +162,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
         if (f.needInit) {
             f.needInit = false;
             rb::Node n; n.cp = this->createCheckpoint(); n.sc = 0; n.prev = false;
+            if (!n.cp) { f.mode = rb::Mode::Idle; FLAlertLayer::create("Route Bot", "createCheckpoint() returned null - cannot search here.", "OK")->show(); return; }
             f.path.push_back(std::move(n));
             f.visited.insert(stateKey(0));
             return;
@@ -227,10 +231,11 @@ class $modify(RoutePlayLayer, PlayLayer) {
         double secs = rb::msSince(f.t0) / 1000.0;
         if (f.steps > 2000) Mod::get()->setSavedValue<double>("ms-step", secs * 1000.0 / (double)f.steps);
 
-        Notification::create(
-            ok ? fmt::format("Route found in {:.1f}s ({} inputs)", secs, f.route.size())
-               : fmt::format("Route incomplete: reached {:.1f}% in {:.1f}s", f.bestPct, secs),
-            ok ? NotificationIcon::Success : NotificationIcon::Warning)->show();
+        if (ok) Notification::create(fmt::format("Route found in {:.1f}s ({} inputs)", secs, f.route.size()), NotificationIcon::Success)->show();
+        else FLAlertLayer::create("Route Bot", fmt::format(
+            "<cr>Search incomplete</c>\nReached {:.1f}% in {:.1f}s\nsteps {}  nodes {}  backtracks {}\ndeaths {}  first death: step {} object {}\n\nTip: raise Window, lower Block steps.",
+            f.bestPct, secs, f.steps, f.expansions, f.backtracks, f.deaths, f.dStep, f.dObj), "OK")->show();
+        log::info("Route Bot: finished ok={} pct={} steps={} deaths={}", ok, f.bestPct, f.steps, f.deaths);
 
         if (!f.route.empty() && rb::flag("auto-follow")) beginFollow();
         else { f.mode = rb::Mode::Idle; this->resetLevelFromStart(); releaseAll(); }
@@ -282,7 +287,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
         f.path.push_back(std::move(n));
         f.visited.insert(stateKey(f.sc / blockSteps()));
         f.died = f.completed = false; f.needInit = false;
-        f.t0 = Clock::now(); f.steps = f.expansions = f.backtracks = 0; f.bestPct = 0;
+        f.t0 = Clock::now(); f.steps = f.expansions = f.backtracks = 0; f.bestPct = 0; f.deaths = 0; f.dStep = 0; f.dObj = -1;
         f.mode = rb::Mode::Search;
         Notification::create("Re-planning from a safe checkpoint...", NotificationIcon::Info)->show();
     }
@@ -300,8 +305,8 @@ class $modify(RoutePlayLayer, PlayLayer) {
         if (f.mode == rb::Mode::Search) {
             double el = rb::msSince(f.t0) / 1000.0, pct = f.bestPct;
             double eta = pct > 1.0 ? el * (100.0 - pct) / pct : -1.0;
-            f.label->setString(fmt::format("ANALYZING {:.1f}%  elapsed {}  ETA {}\nnodes {}  backtracks {}",
-                pct, rb::clockStr(el), rb::clockStr(eta), f.expansions, f.backtracks).c_str());
+            f.label->setString(fmt::format("ANALYZING {:.1f}%  elapsed {}  ETA {}\nsteps {}  nodes {}  back {}  deaths {}",
+                pct, rb::clockStr(el), rb::clockStr(eta), f.steps, f.expansions, f.backtracks, f.deaths).c_str());
         } else if (f.mode == rb::Mode::Follow) {
             f.label->setString(fmt::format("FOLLOWING ROUTE  {}/{} inputs  replans {}", f.ri, f.route.size(), f.replans).c_str());
         } else f.label->setString("");
@@ -327,7 +332,10 @@ class $modify(RoutePlayLayer, PlayLayer) {
             f.stats.seconds, f.stats.hazards, f.stats.orbs, f.stats.pads, f.stats.modes, f.stats.speeds,
             rb::clockStr(est), blockSteps(), rb::cfg("window"));
         createQuickPopup("Route Bot", txt, "Cancel", "Analyze + Follow", [this](FLAlertLayer*, bool ok) {
-            if (ok) this->startSearch(true);
+            if (ok) {
+                this->startSearch(true);
+                Notification::create("Analysis started - keep the screen on", NotificationIcon::Info)->show();
+            }
         });
     }
 
@@ -344,7 +352,8 @@ class $modify(RoutePlayLayer, PlayLayer) {
         menu->addChild(btn);
         this->addChild(menu, 200);
         auto lbl = CCLabelBMFont::create("", "bigFont.fnt");
-        lbl->setScale(.3f);
+        lbl->setScale(.45f);
+        lbl->setColor({255, 230, 80});
         lbl->setPosition({win.width / 2, win.height - 28.f});
         this->addChild(lbl, 201);
         m_fields->label = lbl;
@@ -360,7 +369,10 @@ class $modify(RoutePlayLayer, PlayLayer) {
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
         auto& f = fld();
-        if (f.mode != rb::Mode::Idle) { f.died = true; return; }   // sin animacion de muerte durante bot
+        if (f.mode != rb::Mode::Idle) {
+            if (f.deaths++ == 0) { f.dStep = f.sc; f.dObj = o ? o->m_objectID : -1; }
+            f.died = true; return;
+        }   // sin animacion de muerte durante bot
         PlayLayer::destroyPlayer(p, o);
     }
 
