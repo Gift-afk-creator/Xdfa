@@ -65,7 +65,9 @@ class $modify(RoutePlayLayer, PlayLayer) {
         uint64_t steps = 0, expansions = 0, backtracks = 0;
         CCLabelBMFont* label = nullptr;
         rb::Stats stats;
+        bool hold = false;     // estado REAL del boton (lo llevamos nosotros)
     };
+    Fields& fld() { return *m_fields.operator->(); }
 
     // ------------------------------------------------------------------ utilidades
     float stepDt() {
@@ -74,17 +76,22 @@ class $modify(RoutePlayLayer, PlayLayer) {
     }
     int blockSteps() { return (int)std::max<int64_t>(1, rb::cfg("block-steps")); }
 
-    void setHold(bool h) {                       // pulsa / suelta el boton de forma "real"
-        if (m_player1->m_holdingButton == h) return;
+    bool dual() { return m_player2 && m_player2->isVisible(); }
+    void setHold(bool h) {                       // pulsa / suelta el boton (llevamos el estado nosotros)
+        auto& f = fld();
+        if (f.hold == h) return;
+        f.hold = h;
         this->handleButton(h, 1, true);
-        if (m_gameState.m_isDualMode) this->handleButton(h, 1, false);
+        if (dual()) this->handleButton(h, 1, false);
     }
-    void forceHold(bool h) {                     // fija el estado del boton SIN generar evento (tras restaurar)
-        m_player1->m_holdingButton = h;
-        if (m_player2) m_player2->m_holdingButton = h;
+    void releaseAll() {
+        auto& f = fld();
+        this->handleButton(false, 1, true);
+        if (dual()) this->handleButton(false, 1, false);
+        f.hold = false;
     }
     void stepOnce() {                            // avanza UN paso fisico del juego
-        auto& f = *m_fields;
+        auto& f = fld();
         f.inSim = true;
         this->update(stepDt());
         f.inSim = false;
@@ -100,7 +107,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
         mix((uint64_t)(int64_t)std::lround(p->getPositionX() * 0.25));
         uint64_t b = 0;
         b |= (uint64_t)p->m_isUpsideDown << 0;  b |= (uint64_t)p->m_isOnGround << 1;
-        b |= (uint64_t)p->m_holdingButton << 2; b |= (uint64_t)p->m_isShip << 3;
+        b |= (uint64_t)fld().hold << 2; b |= (uint64_t)p->m_isShip << 3;
         b |= (uint64_t)p->m_isBird << 4;        b |= (uint64_t)p->m_isBall << 5;
         b |= (uint64_t)p->m_isDart << 6;        b |= (uint64_t)p->m_isRobot << 7;
         b |= (uint64_t)p->m_isSpider << 8;      b |= (uint64_t)p->m_isSwing << 9;
@@ -135,20 +142,20 @@ class $modify(RoutePlayLayer, PlayLayer) {
 
     // ------------------------------------------------------------------ 2) BUSQUEDA DE RUTA
     void startSearch(bool fresh) {
-        auto& f = *m_fields;
+        auto& f = fld();
         f.path.clear(); f.route.clear(); f.visited.clear();
         f.lastHold = false; f.died = f.completed = false;
         f.steps = f.expansions = f.backtracks = 0; f.bestPct = 0;
         if (fresh) f.replans = 0;
         f.safeA = nullptr; f.safeB = nullptr;
-        this->resetLevelFromStart();
+        this->resetLevelFromStart(); releaseAll();
         f.sc = 0; f.t0 = Clock::now();
         f.needInit = true;                       // el nodo inicial se crea en el siguiente frame
         f.mode = rb::Mode::Search;
     }
 
     void runSearchSlice() {
-        auto& f = *m_fields;
+        auto& f = fld();
         if (f.needInit) {
             f.needInit = false;
             rb::Node n; n.cp = this->createCheckpoint(); n.sc = 0; n.prev = false;
@@ -167,7 +174,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
 
     // Una expansion de la busqueda en profundidad. Devuelve false si la busqueda termino.
     bool expand() {
-        auto& f = *m_fields;
+        auto& f = fld();
         if (f.path.empty()) { finishSearch(false); return false; }
         rb::Node& n = f.path.back();
 
@@ -181,10 +188,10 @@ class $modify(RoutePlayLayer, PlayLayer) {
         else                { opt = !n.prev; n.tried |= 2; }   // luego: cambiarlo
         n.chosen = opt;
 
+        setHold(n.prev);                         // dejar el boton como estaba en el nodo (sobre el estado "muerto")
         this->loadFromCheckpoint(n.cp);          // volver al estado del nodo
         f.sc = n.sc; f.died = f.completed = false;
-        forceHold(n.prev);
-        setHold(opt);
+        setHold(opt);                            // el unico evento real es prev -> opt
 
         int D = blockSteps();
         for (int i = 0; i < D; i++) {
@@ -211,7 +218,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
     }
 
     void finishSearch(bool ok) {
-        auto& f = *m_fields;
+        auto& f = fld();
         for (auto& n : f.path) {
             if (!n.tried) continue;
             if (n.chosen != f.lastHold) { f.route.push_back({n.sc, n.chosen}); f.lastHold = n.chosen; }
@@ -226,21 +233,21 @@ class $modify(RoutePlayLayer, PlayLayer) {
             ok ? NotificationIcon::Success : NotificationIcon::Warning)->show();
 
         if (!f.route.empty() && rb::flag("auto-follow")) beginFollow();
-        else { f.mode = rb::Mode::Idle; this->resetLevelFromStart(); }
+        else { f.mode = rb::Mode::Idle; this->resetLevelFromStart(); releaseAll(); }
     }
 
     // ------------------------------------------------------------------ 3) SEGUIR LA RUTA
     void beginFollow() {
-        auto& f = *m_fields;
+        auto& f = fld();
         f.mode = rb::Mode::Follow;
         f.safeA = nullptr; f.safeB = nullptr;
         f.died = f.completed = false;
-        this->resetLevelFromStart();
+        this->resetLevelFromStart(); releaseAll();
         f.sc = 0; f.ri = 0; f.acc = 0.f;
     }
 
     void runFollow(float dt) {
-        auto& f = *m_fields;
+        auto& f = fld();
         float sd = 1.f / (float)std::max<int64_t>(30, rb::cfg("tps"));
         f.acc += dt;
         int n = 0;
@@ -249,7 +256,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
             while (f.ri < f.route.size() && f.route[f.ri].sc <= f.sc) { setHold(f.route[f.ri].hold); f.ri++; }
             if (f.sc > 0 && f.sc % 120 == 0) {   // checkpoint "seguro" cada medio segundo (guardamos los 2 ultimos)
                 f.safeA = f.safeB; f.safeAsc = f.safeBsc; f.safeAhold = f.safeBhold;
-                f.safeB = this->createCheckpoint(); f.safeBsc = f.sc; f.safeBhold = m_player1->m_holdingButton;
+                f.safeB = this->createCheckpoint(); f.safeBsc = f.sc; f.safeBhold = f.hold;
             }
             stepOnce();
             if (f.died) { f.died = false; onFollowDeath(); return; }
@@ -257,16 +264,17 @@ class $modify(RoutePlayLayer, PlayLayer) {
     }
 
     void onFollowDeath() {                       // desincronizado: re-analizar desde un punto seguro
-        auto& f = *m_fields;
+        auto& f = fld();
         if (++f.replans > (int)rb::cfg("max-replans")) {
             f.mode = rb::Mode::Idle;
             Notification::create("Route desynced - giving up", NotificationIcon::Error)->show();
-            this->resetLevelFromStart();
+            this->resetLevelFromStart(); releaseAll();
             return;
         }
         if (!f.safeA) { startSearch(false); return; }
+        setHold(f.safeAhold);
         this->loadFromCheckpoint(f.safeA);
-        f.sc = f.safeAsc; forceHold(f.safeAhold);
+        f.sc = f.safeAsc;
         while (!f.route.empty() && f.route.back().sc > f.safeAsc) f.route.pop_back();
         f.lastHold = f.safeAhold;
         f.path.clear(); f.visited.clear();
@@ -280,14 +288,14 @@ class $modify(RoutePlayLayer, PlayLayer) {
     }
 
     void stopBot() {
-        auto& f = *m_fields;
+        auto& f = fld();
         f.mode = rb::Mode::Idle; f.path.clear(); f.visited.clear(); f.inSim = false;
-        this->resetLevelFromStart();
+        this->resetLevelFromStart(); releaseAll();
     }
 
     // ------------------------------------------------------------------ UI
     void updateHud() {
-        auto& f = *m_fields;
+        auto& f = fld();
         if (!f.label) return;
         if (f.mode == rb::Mode::Search) {
             double el = rb::msSince(f.t0) / 1000.0, pct = f.bestPct;
@@ -300,7 +308,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
     }
 
     void onBotButton(CCObject*) {
-        auto& f = *m_fields;
+        auto& f = fld();
         if (f.mode != rb::Mode::Idle) { stopBot(); return; }
         if (m_level->isPlatformer()) {
             FLAlertLayer::create("Route Bot", "Platformer levels are not supported.", "OK")->show();
@@ -343,7 +351,7 @@ class $modify(RoutePlayLayer, PlayLayer) {
     }
 
     void update(float dt) {
-        auto& f = *m_fields;
+        auto& f = fld();
         if (f.inSim || f.mode == rb::Mode::Idle) { PlayLayer::update(dt); return; }
         if (f.mode == rb::Mode::Search) runSearchSlice();
         else runFollow(dt);
@@ -351,13 +359,13 @@ class $modify(RoutePlayLayer, PlayLayer) {
     }
 
     void destroyPlayer(PlayerObject* p, GameObject* o) {
-        auto& f = *m_fields;
+        auto& f = fld();
         if (f.mode != rb::Mode::Idle) { f.died = true; return; }   // sin animacion de muerte durante bot
         PlayLayer::destroyPlayer(p, o);
     }
 
     void levelComplete() {
-        auto& f = *m_fields;
+        auto& f = fld();
         if (f.mode == rb::Mode::Search) { f.completed = true; return; }  // no mostrar pantalla final mientras buscamos
         if (f.mode == rb::Mode::Follow) {
             f.mode = rb::Mode::Idle;
@@ -368,7 +376,8 @@ class $modify(RoutePlayLayer, PlayLayer) {
 
     void resetLevel() {
         PlayLayer::resetLevel();
-        auto& f = *m_fields;
+        auto& f = fld();
+        f.hold = false;
         if (f.mode == rb::Mode::Follow) { f.sc = 0; f.ri = 0; f.acc = 0.f; }
     }
 };
