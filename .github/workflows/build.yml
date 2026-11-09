@@ -11,7 +11,6 @@ jobs:
         config:
         - { name: Android32, os: ubuntu-latest, target: Android32 }
         - { name: Android64, os: ubuntu-latest, target: Android64 }
-        - { name: Windows,   os: windows-latest }
     name: ${{ matrix.config.name }}
     runs-on: ${{ matrix.config.os }}
     steps:
@@ -34,4 +33,3 @@ jobs:
         with:
           name: Build Output
           path: ${{ steps.build.outputs.build-output }}
-          
