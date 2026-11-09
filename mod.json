@@ -1,0 +1,19 @@
+{
+  "geode": "5.0.0",
+  "gd": { "win": "2.2081", "android": "2.2081", "mac": "2.2081", "ios": "2.2081" },
+  "version": "v1.0.0",
+  "id": "tunombre.route-bot",
+  "name": "Route Bot",
+  "developer": "tunombre",
+  "description": "Analiza el nivel, calcula una ruta con la fisica real del juego y la sigue (modo practica).",
+  "settings": {
+    "practice-only": { "type": "bool", "name": "Solo modo practica", "description": "El bot solo funciona en practica/prueba (no toca stats ni leaderboards).", "default": true },
+    "auto-follow": { "type": "bool", "name": "Seguir al terminar", "description": "Al terminar de analizar, reinicia y sigue la ruta.", "default": true },
+    "block-steps": { "type": "int", "name": "Bloque de decision (pasos)", "description": "Cada cuantos pasos fisicos decide pulsar/soltar. Menos = mas preciso pero mas lento.", "default": 4, "min": 1, "max": 12 },
+    "window": { "type": "int", "name": "Ventana de retroceso (bloques)", "description": "Cuantos bloques puede deshacer. Mas = mas RAM y mas capacidad de resolver tramos dificiles.", "default": 240, "min": 30, "max": 2000 },
+    "tps": { "type": "int", "name": "Pasos fisicos por segundo", "description": "240 en GD 2.2. Cambialo solo si tu version usa otro valor.", "default": 240, "min": 60, "max": 960 },
+    "budget-ms": { "type": "int", "name": "Presupuesto por frame (ms)", "description": "Tiempo de calculo por frame. Mas = analisis mas rapido pero pantalla menos fluida.", "default": 12, "min": 2, "max": 100 },
+    "max-seconds": { "type": "int", "name": "Tiempo maximo de analisis (s)", "description": "Si se pasa, guarda la ruta parcial.", "default": 900, "min": 10, "max": 7200 },
+    "max-replans": { "type": "int", "name": "Re-planificaciones maximas", "description": "Veces que re-analiza si se desincroniza al seguir la ruta.", "default": 5, "min": 0, "max": 50 }
+  }
+}
