@@ -419,4 +419,222 @@ class $modify(RoutePlayLayer, PlayLayer) {
         f.bestPct = std::max(f.bestPct, (double)this->getCurrentPercent());
         f.bestSc = std::max(f.bestSc, f.sc);
 
-        size_t W = windowNow(
+        size_t W = windowNow();
+        while (f.path.size() > W) { commit(f.path.front()); f.path.pop_front(); }
+        return true;
+    }
+
+    void finishSearch(bool ok) {
+        auto& f = fld();
+        for (auto& n : f.path) if (n.init) commit(n);
+        f.path.clear(); f.visited.clear(); f.anchors.clear(); f.commitKeys.clear();
+        double secs = rb::msSince(f.t0) / 1000.0;
+        if (f.steps > 2000) Mod::get()->setSavedValue<double>("ms-step", secs * 1000.0 / (double)f.steps);
+        showOverlay(false);
+
+        if (ok) Notification::create(fmt::format("Route found in {:.1f}s ({} inputs)", secs, f.route.size()), NotificationIcon::Success)->show();
+        else FLAlertLayer::create("Route Bot", fmt::format(
+            "<cr>Search incomplete</c>\nReached {:.1f}% in {:.1f}s\nsteps {}  nodes {}  backtracks {}  restarts {}\ndeaths {}  first death: step {} object {}\n\nTip: use MAX, raise Window, lower Block steps.",
+            f.bestPct, secs, f.steps, f.expansions, f.backtracks, f.restarts, f.deaths, f.dStep, f.dObj), "OK")->show();
+        log::info("Route Bot: finished ok={} pct={} steps={} deaths={} restarts={}", ok, f.bestPct, f.steps, f.deaths, f.restarts);
+
+        if (!f.route.empty() && rb::flag("auto-follow")) beginFollow();
+        else { f.mode = rb::Mode::Idle; this->resetLevelFromStart(); releaseAll(); }
+    }
+
+    // ================================================================== SEGUIR LA RUTA
+    void beginFollow() {
+        auto& f = fld();
+        f.mode = rb::Mode::Follow;
+        f.safeA = nullptr; f.safeB = nullptr;
+        f.died = f.completed = false;
+        this->resetLevelFromStart(); releaseAll();
+        f.sc = 0; f.ri = 0; f.acc = 0.f;
+        showOverlay(false);
+    }
+
+    void runFollow(float dt) {
+        auto& f = fld();
+        float sd = 1.f / (float)std::max<int64_t>(30, rb::cfg("tps"));
+        f.acc += dt;
+        int n = 0;
+        while (f.acc >= sd && n < 48 && f.mode == rb::Mode::Follow) {
+            f.acc -= sd; n++;
+            while (f.ri < f.route.size() && f.route[f.ri].sc <= f.sc) { setHold(f.route[f.ri].hold); f.ri++; }
+            if (f.sc > 0 && f.sc % 120 == 0) {   // checkpoint seguro cada medio segundo (los 2 ultimos)
+                f.safeA = f.safeB; f.safeAsc = f.safeBsc; f.safeAhold = f.safeBhold;
+                f.safeB = this->createCheckpoint(); f.safeBsc = f.sc; f.safeBhold = f.hold;
+            }
+            stepOnce();
+            if (f.died) { f.died = false; onFollowDeath(); return; }
+        }
+    }
+
+    void onFollowDeath() {                       // desincronizado: seguir buscando desde un punto seguro
+        auto& f = fld();
+        if (++f.replans > (int)rb::cfg("max-replans")) {
+            f.mode = rb::Mode::Idle;
+            Notification::create("Route desynced - giving up", NotificationIcon::Error)->show();
+            this->resetLevelFromStart(); releaseAll();
+            return;
+        }
+        if (!f.safeA) { startSearch(false, f.maxMode); return; }
+        setHold(f.safeAhold);
+        this->loadFromCheckpoint(f.safeA);
+        f.sc = f.safeAsc;
+        while (!f.route.empty() && f.route.back().sc > f.safeAsc) f.route.pop_back();
+        while (!f.trail.empty() && f.trail.back().sc > f.safeAsc) f.trail.pop_back();
+        f.lastHold = f.safeAhold;
+        f.path.clear(); f.visited.clear(); f.anchors.clear(); f.commitKeys.clear(); f.commitCount = 0; f.restarts = 0;
+        rb::Node n; n.cp = f.safeA; n.sc = f.safeAsc; n.prev = f.safeAhold;
+        auto p = m_player1->getPosition(); n.x = p.x; n.y = p.y; n.key = stateKey();
+        f.startAnchor = rb::Anchor();
+        f.startAnchor.cp = n.cp; f.startAnchor.sc = n.sc; f.startAnchor.prev = n.prev; f.startAnchor.lastHold = f.lastHold;
+        f.startAnchor.routeN = f.route.size(); f.startAnchor.trailN = f.trail.size(); f.startAnchor.keyN = 0;
+        f.startAnchor.x = n.x; f.startAnchor.y = n.y; f.startAnchor.key = n.key; f.startAnchor.valid = true;
+        f.visited.insert(n.key);
+        f.path.push_back(std::move(n));
+        f.died = f.completed = false; f.needInit = false;
+        f.t0 = Clock::now(); f.steps = f.expansions = f.backtracks = 0; f.bestPct = 0; f.deaths = 0; f.dStep = 0; f.dObj = -1;
+        f.mode = rb::Mode::Search;
+        showOverlay(f.maxMode);
+        trailRedraw();
+        Notification::create("Still searching: re-planning from a safe checkpoint...", NotificationIcon::Info)->show();
+    }
+
+    void stopBot() {
+        auto& f = fld();
+        f.mode = rb::Mode::Idle; f.path.clear(); f.visited.clear(); f.anchors.clear(); f.inSim = false;
+        showOverlay(false);
+        this->resetLevelFromStart(); releaseAll();
+    }
+
+    // ================================================================== UI
+    void showOverlay(bool show) {
+        auto& f = fld();
+        auto win = CCDirector::get()->getWinSize();
+        if (show && !f.overlay) {
+            f.overlay = CCLayerColor::create({0, 0, 0, 225}, win.width, win.height);
+            f.ovLabel = CCLabelBMFont::create("", "bigFont.fnt");
+            f.ovLabel->setScale(.5f);
+            f.ovLabel->setPosition({win.width / 2, win.height / 2 + 25.f});
+            f.overlay->addChild(f.ovLabel);
+            auto bg = CCLayerColor::create({50, 50, 50, 255}, win.width * .6f, 8.f);
+            bg->setPosition({win.width * .2f, win.height / 2 - 40.f});
+            f.overlay->addChild(bg);
+            f.ovBar = CCLayerColor::create({60, 255, 120, 255}, 1.f, 8.f);
+            f.ovBar->setPosition({win.width * .2f, win.height / 2 - 40.f});
+            f.overlay->addChild(f.ovBar);
+            this->addChild(f.overlay, 300);
+        }
+        if (f.overlay) f.overlay->setVisible(show);
+    }
+
+    void updateHud() {
+        auto& f = fld();
+        if (!f.label) return;
+        if (f.mode == rb::Mode::Search) {
+            double el = rb::msSince(f.t0) / 1000.0, pct = f.bestPct;
+            double eta = pct > 1.0 ? el * (100.0 - pct) / pct : -1.0;
+            auto veh = rb::vehName(vehicle());
+            f.label->setString(fmt::format("{} {:.1f}%  elapsed {}  ETA {}\n{}  steps {}  nodes {}  back {}  restarts {}  deaths {}",
+                f.maxMode ? "MAX ANALYSIS" : "ANALYZING", pct, rb::clockStr(el), rb::clockStr(eta), veh, f.steps, f.expansions, f.backtracks, f.restarts, f.deaths).c_str());
+            if (f.maxMode && f.overlay && f.ovLabel && f.ovBar) {
+                auto win = CCDirector::get()->getWinSize();
+                f.ovLabel->setString(fmt::format("ANALYZING TO THE MAX\nVehicle: {}   Hazards: {}\n{:.1f}%   {}   ETA {}\nrestarts {}   nodes {}",
+                    veh, f.stats.hazards, pct, rb::clockStr(el), rb::clockStr(eta), f.restarts, f.expansions).c_str());
+                f.ovBar->setContentSize({std::max(1.f, win.width * .6f * (float)(pct / 100.0)), 8.f});
+            }
+        } else if (f.mode == rb::Mode::Follow) {
+            f.label->setString(fmt::format("FOLLOWING ROUTE  {}/{} inputs  replans {}", f.ri, f.route.size(), f.replans).c_str());
+        } else f.label->setString("");
+    }
+
+    void onBotButton(CCObject* sender) {
+        auto& f = fld();
+        bool maxM = static_cast<CCNode*>(sender)->getTag() == 1;
+        if (f.mode != rb::Mode::Idle) { stopBot(); return; }
+        if (m_level->isPlatformer()) {
+            FLAlertLayer::create("Route Bot", "Platformer levels are not supported.", "OK")->show();
+            return;
+        }
+        if (rb::flag("practice-only") && !m_isPracticeMode && !m_isTestMode) {
+            FLAlertLayer::create("Route Bot", "Enable <cy>Practice Mode</c> first.\n(Keeps stats and leaderboards clean.)", "OK")->show();
+            return;
+        }
+        auto st = analyzeLevel(false);
+        double msStep = Mod::get()->getSavedValue<double>("ms-step", 0.4);
+        double est = st.seconds * (double)rb::cfg("tps") * msStep / 1000.0 * (maxM ? 3.0 : 1.5);
+        auto txt = fmt::format(
+            "<cy>{}</c>\nVehicle now: {}\nLength: ~{:.1f}s   Hazards: {}\nOrbs: {}   Pads: {}\nMode portals: {}   Speed portals: {}\n\n"
+            "Estimated time: <cg>~{}</c> (live ETA)\n{}",
+            maxM ? "ANALYZE TO THE MAX" : "Quick analysis", rb::vehName(vehicle()), st.seconds, st.hazards, st.orbs, st.pads, st.modes, st.speeds,
+            rb::clockStr(est),
+            maxM ? "Loading screen, hitbox scan, vehicle-aware blocks,\nsafest route, retries until solved."
+                 : "Fast search (you can watch it).");
+        createQuickPopup("Route Bot", txt, "Cancel", maxM ? "Analyze MAX" : "Analyze + Follow", [this, maxM](FLAlertLayer*, bool ok) {
+            if (ok) {
+                this->startSearch(true, maxM);
+                Notification::create("Analysis started - keep the screen on", NotificationIcon::Info)->show();
+            }
+        });
+    }
+
+    // ================================================================== hooks
+    void setupHasCompleted() {
+        PlayLayer::setupHasCompleted();
+        auto win = CCDirector::get()->getWinSize();
+        auto menu = CCMenu::create();
+        menu->setPosition({0, 0});
+        char const* names[3] = {"BOT", "MAX", "TRAIL"};
+        for (int i = 0; i < 3; i++) {
+            auto spr = ButtonSprite::create(names[i]);
+            spr->setScale(.5f);
+            auto btn = CCMenuItemSpriteExtra::create(spr, this, i == 2 ? menu_selector(RoutePlayLayer::onTrailButton) : menu_selector(RoutePlayLayer::onBotButton));
+            btn->setTag(i);
+            btn->setPosition({win.width - 30.f - 52.f * i, win.height - 16.f});
+            menu->addChild(btn);
+        }
+        this->addChild(menu, 400);
+        auto lbl = CCLabelBMFont::create("", "bigFont.fnt");
+        lbl->setScale(.4f);
+        lbl->setColor({255, 230, 80});
+        lbl->setPosition({win.width / 2, win.height - 30.f});
+        this->addChild(lbl, 401);
+        fld().label = lbl;
+    }
+
+    void update(float dt) {
+        auto& f = fld();
+        if (f.inSim || f.mode == rb::Mode::Idle) { PlayLayer::update(dt); return; }
+        if (f.mode == rb::Mode::Search) runSearchSlice();
+        else runFollow(dt);
+        updateHud();
+    }
+
+    void destroyPlayer(PlayerObject* p, GameObject* o) {
+        auto& f = fld();
+        if (f.mode != rb::Mode::Idle) {
+            if (f.deaths++ == 0) { f.dStep = f.sc; f.dObj = o ? o->m_objectID : -1; }
+            f.died = true; return;
+        }
+        PlayLayer::destroyPlayer(p, o);
+    }
+
+    void levelComplete() {
+        auto& f = fld();
+        if (f.mode == rb::Mode::Search) { f.completed = true; return; }
+        if (f.mode == rb::Mode::Follow) {
+            f.mode = rb::Mode::Idle;
+            Notification::create("Route completed!", NotificationIcon::Success)->show();
+        }
+        PlayLayer::levelComplete();
+    }
+
+    void resetLevel() {
+        PlayLayer::resetLevel();
+        auto& f = fld();
+        f.hold = false;
+        if (f.mode == rb::Mode::Follow) { f.sc = 0; f.ri = 0; f.acc = 0.f; }
+    }
+};
